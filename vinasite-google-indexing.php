@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Vinasite Google Indexing
  * Plugin URI: https://github.com/dinhducmarketing-droid/vinasite-google-indexing
- * Description: Gửi URL lên Google Indexing API bằng service account. Tự động gửi index khi publish + quét index hàng ngày (URL Inspection API) chỉ gửi bài CHƯA ĐƯỢC INDEX + bulk submit + log + retry chống timeout.
- * Version: 1.2
+ * Description: Gửi URL lên Google Indexing API bằng service account. Tự động gửi index khi publish + chạy hàng ngày theo 2 kiểu: Gửi thẳng (không cần Search Console) hoặc Thông minh (hỏi đã index chưa rồi chỉ gửi bài chưa index) + bulk submit + log + retry chống timeout.
+ * Version: 1.3
  * Author: Vinasite
  * Author URI: https://vinasite.com.vn/
  * Update URI: https://github.com/dinhducmarketing-droid/vinasite-google-indexing
@@ -56,6 +56,13 @@ class Vinasite_Google_Indexing {
 	const OPT_SUBMIT_MAX   = 'vgi_submit_max';     // số URL gửi/ngày   (quota Google 200)
 	const OPT_STATS        = 'vgi_stats';          // kết quả lần chạy gần nhất
 	const CRON_HOOK        = 'vgi_daily_scan';
+	// Kiểu chạy hàng ngày:
+	//  'smart'  = hỏi Google đã index chưa (URL Inspection, CẦN quyền Search Console)
+	//             rồi chỉ gửi bài chưa index. Tiết kiệm quota nhưng cần cấu hình GSC.
+	//  'direct' = gửi thẳng bài mới nhất lên Indexing API, KHÔNG hỏi Search Console.
+	//             Chạy được ngay chỉ với quyền Indexing API.
+	const OPT_DAILY_MODE   = 'vgi_daily_mode';     // 'smart' (mặc định) | 'direct'
+	const OPT_RESUBMIT_DAYS = 'vgi_resubmit_days'; // chế độ 'direct': chỉ gửi lại 1 URL sau N ngày
 	const META_CHECKED     = '_vgi_checked';       // timestamp lần kiểm tra cuối
 	const META_STATE       = '_vgi_state';         // coverageState của Google
 	const META_INDEXED     = '_vgi_indexed';       // '1' đã index / '0' chưa
@@ -69,7 +76,16 @@ class Vinasite_Google_Indexing {
 		add_action('admin_post_vgi_test', [$this, 'handle_test']);
 		add_action('admin_post_vgi_bulk', [$this, 'handle_bulk']);
 		add_action('admin_post_vgi_scan_now', [$this, 'handle_scan_now']);
-		add_action(self::CRON_HOOK, [$this, 'daily_scan']);
+		add_action(self::CRON_HOOK, [$this, 'run_daily']);
+	}
+
+	/* ---------- Cron hàng ngày: chạy đúng kiểu đã chọn ---------- */
+	public function run_daily() {
+		if (get_option(self::OPT_DAILY_MODE, 'smart') === 'direct') {
+			$this->daily_direct_submit();
+		} else {
+			$this->daily_scan();
+		}
 	}
 
 	/* ---------- Bật/tắt lịch chạy ---------- */
@@ -272,7 +288,7 @@ class Vinasite_Google_Indexing {
 		$deadline    = time() + self::TIME_BUDGET;
 
 		$ids = $this->scan_candidates($inspect_max);
-		$stats = ['time' => current_time('Y-m-d H:i:s'), 'checked' => 0, 'indexed' => 0, 'not_indexed' => 0, 'sent' => 0, 'err' => 0, 'note' => ''];
+		$stats = ['mode' => 'smart', 'time' => current_time('Y-m-d H:i:s'), 'checked' => 0, 'indexed' => 0, 'not_indexed' => 0, 'sent' => 0, 'err' => 0, 'note' => ''];
 
 		foreach ($ids as $id) {
 			if (time() > $deadline) { $stats['note'] = 'Dừng theo ngân sách thời gian (' . self::TIME_BUDGET . 's) — phần còn lại chạy ngày mai.'; break; }
@@ -313,6 +329,84 @@ class Vinasite_Google_Indexing {
 		));
 	}
 
+	/* ---------- Chọn bài để GỬI THẲNG: chưa gửi bao giờ trước, rồi tới gửi lâu nhất ----------
+	 * Không hỏi Search Console. Bài đã gửi trong vòng $resubmit_days ngày thì bỏ qua
+	 * để khỏi gửi lại URL không đổi mỗi ngày (đỡ tốn quota Indexing 200/ngày).
+	 */
+	private function submit_candidates($limit, $resubmit_days) {
+		$types = (array) get_option(self::OPT_TYPES, ['page', 'post']);
+
+		// Ưu tiên 1: chưa từng gửi (không có meta _vgi_sent) — bài mới nhất trước.
+		$ids = get_posts([
+			'post_type'      => $types,
+			'post_status'    => 'publish',
+			'posts_per_page' => $limit,
+			'fields'         => 'ids',
+			'orderby'        => 'date',
+			'order'          => 'DESC',
+			'no_found_rows'  => true,
+			'meta_query'     => [['key' => self::META_SENT, 'compare' => 'NOT EXISTS']],
+		]);
+		if (count($ids) >= $limit) return $ids;
+
+		// Ưu tiên 2: đã gửi rồi nhưng lâu nhất VÀ quá hạn gửi lại ($resubmit_days ngày).
+		$more = get_posts([
+			'post_type'      => $types,
+			'post_status'    => 'publish',
+			'posts_per_page' => $limit - count($ids),
+			'fields'         => 'ids',
+			'orderby'        => 'meta_value_num',
+			'meta_key'       => self::META_SENT,
+			'order'          => 'ASC',
+			'no_found_rows'  => true,
+			'post__not_in'   => $ids ?: [0],
+			'meta_query'     => [[
+				'key'     => self::META_SENT,
+				'value'   => time() - $resubmit_days * DAY_IN_SECONDS,
+				'compare' => '<',
+				'type'    => 'NUMERIC',
+			]],
+		]);
+		return array_merge($ids, $more);
+	}
+
+	/* ---------- GỬI THẲNG hàng ngày: gửi bài mới nhất lên Indexing API (KHÔNG hỏi GSC) ---------- */
+	public function daily_direct_submit() {
+		if (!get_option(self::OPT_JSON)) return;
+
+		$submit_max    = max(1, min(190, (int) get_option(self::OPT_SUBMIT_MAX, 150)));
+		$resubmit_days = max(1, (int) get_option(self::OPT_RESUBMIT_DAYS, 10));
+		$deadline      = time() + self::TIME_BUDGET;
+
+		$ids = $this->submit_candidates($submit_max, $resubmit_days);
+		$stats = ['mode' => 'direct', 'time' => current_time('Y-m-d H:i:s'), 'checked' => 0, 'indexed' => 0, 'not_indexed' => 0, 'sent' => 0, 'err' => 0, 'note' => ''];
+
+		foreach ($ids as $id) {
+			if (time() > $deadline) { $stats['note'] = 'Dừng theo ngân sách thời gian (' . self::TIME_BUDGET . 's) — phần còn lại chạy ngày mai.'; break; }
+
+			$url = get_permalink($id);
+			$res = $this->submit_url($url, 'URL_UPDATED');
+
+			if ($res === true) {
+				$stats['sent']++;
+				update_post_meta($id, self::META_SENT, time());
+			} else {
+				$stats['err']++;
+				// Lỗi xác thực/cấu hình thì dừng hẳn, chạy tiếp chỉ tốn thời gian.
+				if (is_wp_error($res) && in_array($res->get_error_code(), ['no_json', 'bad_json', 'sign'], true)) {
+					$stats['note'] = $res->get_error_message();
+					break;
+				}
+			}
+		}
+
+		update_option(self::OPT_STATS, $stats, false);
+		$this->log(home_url('/'), $stats['err'] ? 'ERR' : 'OK', sprintf(
+			'Gửi thẳng ngày: đã gửi %d, lỗi %d. %s',
+			$stats['sent'], $stats['err'], $stats['note']
+		));
+	}
+
 	/* ---------- Log (giữ 100 dòng cuối) ---------- */
 	private function log($url, $status, $msg) {
 		$log = (array) get_option(self::OPT_LOG, []);
@@ -341,12 +435,15 @@ class Vinasite_Google_Indexing {
 		$types = array_map('sanitize_text_field', (array) ($_POST['types'] ?? []));
 		update_option(self::OPT_TYPES, $types ?: ['page', 'post'], false);
 
-		// Cấu hình quét index hàng ngày
+		// Cấu hình chạy hàng ngày
 		update_option(self::OPT_CRON_ON, empty($_POST['cron_on']) ? '0' : '1', false);
+		$mode = ($_POST['daily_mode'] ?? 'smart') === 'direct' ? 'direct' : 'smart';
+		update_option(self::OPT_DAILY_MODE, $mode, false);
 		$site = esc_url_raw(trim(wp_unslash($_POST['site_url'] ?? '')));
 		update_option(self::OPT_SITE_URL, $site ?: home_url('/'), false);
 		update_option(self::OPT_INSPECT_MAX, max(1, min(2000, (int) ($_POST['inspect_max'] ?? 300))), false);
 		update_option(self::OPT_SUBMIT_MAX,  max(1, min(190,  (int) ($_POST['submit_max']  ?? 150))), false);
+		update_option(self::OPT_RESUBMIT_DAYS, max(1, min(365, (int) ($_POST['resubmit_days'] ?? 10))), false);
 		self::sync_schedule();
 
 		delete_transient('vgi_token'); // key cũ (bản 1.0)
@@ -360,7 +457,7 @@ class Vinasite_Google_Indexing {
 	public function handle_scan_now() {
 		if (!current_user_can('manage_options')) wp_die('no');
 		check_admin_referer('vgi_scan_now');
-		$this->daily_scan();
+		$this->run_daily(); // chạy đúng kiểu đang chọn (smart / direct)
 		wp_redirect(admin_url('tools.php?page=vgi&scanned=1'));
 		exit;
 	}
@@ -420,17 +517,29 @@ class Vinasite_Google_Indexing {
 		foreach (['page'=>'Trang (page)','post'=>'Bài viết (post)','recruit'=>'Tuyển dụng (recruit)','product'=>'Sản phẩm (product)','kho_mau'=>'Mẫu (kho_mau)'] as $pt=>$lbl) {
 			echo '<label style="margin-right:16px"><input type="checkbox" name="types[]" value="' . esc_attr($pt) . '" ' . checked(in_array($pt,$types,true), true, false) . '> ' . esc_html($lbl) . '</label>';
 		}
-		// --- Quét index hàng ngày ---
-		$cron_on  = get_option(self::OPT_CRON_ON) === '1';
-		$site_url = get_option(self::OPT_SITE_URL) ?: home_url('/');
-		$imax     = (int) get_option(self::OPT_INSPECT_MAX, 300);
-		$smax     = (int) get_option(self::OPT_SUBMIT_MAX, 150);
-		echo '<h2>3. Quét index hàng ngày (chỉ gửi bài CHƯA được index)</h2>';
-		echo '<p style="color:#646970">Mỗi ngày hỏi Google từng URL “đã index chưa?” (URL Inspection API), bài nào chưa index thì gửi lên Indexing API. Bài đã index sẽ được kiểm lại sau 30 ngày, bài chưa index kiểm lại sau 3 ngày.</p>';
-		echo '<label><input type="checkbox" name="cron_on" value="1" ' . checked($cron_on, true, false) . '> <b>Bật quét tự động hàng ngày (3:00 sáng)</b></label>';
-		echo '<table class="form-table"><tr><th>Property trong Search Console</th><td><input type="url" name="site_url" value="' . esc_attr($site_url) . '" style="width:420px"><p class="description">Phải khớp CHÍNH XÁC property trong GSC (vd <code>https://vanphongluatsu.com.vn/</code>). Nếu là Domain property thì dùng <code>sc-domain:vanphongluatsu.com.vn</code>.</p></td></tr>';
-		echo '<tr><th>Số URL kiểm tra/ngày</th><td><input type="number" name="inspect_max" value="' . esc_attr($imax) . '" min="1" max="2000" style="width:90px"> <span class="description">Quota Google: 2.000/ngày</span></td></tr>';
-		echo '<tr><th>Số URL gửi index/ngày</th><td><input type="number" name="submit_max" value="' . esc_attr($smax) . '" min="1" max="190" style="width:90px"> <span class="description">Quota Google: 200/ngày</span></td></tr></table>';
+		// --- Chạy tự động hàng ngày ---
+		$cron_on   = get_option(self::OPT_CRON_ON) === '1';
+		$mode      = get_option(self::OPT_DAILY_MODE, 'smart');
+		$site_url  = get_option(self::OPT_SITE_URL) ?: home_url('/');
+		$imax      = (int) get_option(self::OPT_INSPECT_MAX, 300);
+		$smax      = (int) get_option(self::OPT_SUBMIT_MAX, 150);
+		$resub     = (int) get_option(self::OPT_RESUBMIT_DAYS, 10);
+		echo '<h2>3. Tự động gửi index hàng ngày</h2>';
+		echo '<label><input type="checkbox" name="cron_on" value="1" ' . checked($cron_on, true, false) . '> <b>Bật chạy tự động hàng ngày (3:00 sáng)</b></label>';
+
+		echo '<table class="form-table">';
+		echo '<tr><th>Kiểu gửi</th><td>';
+		echo '<label style="display:block;margin-bottom:6px"><input type="radio" name="daily_mode" value="direct" ' . checked($mode, 'direct', false) . '> <b>Gửi thẳng</b> — gửi bài mới nhất thẳng lên Indexing API. <span class="description">Chạy được ngay, chỉ cần quyền Indexing API. Không cần Search Console.</span></label>';
+		echo '<label style="display:block"><input type="radio" name="daily_mode" value="smart" ' . checked($mode, 'smart', false) . '> <b>Thông minh</b> — hỏi Google “đã index chưa?” rồi chỉ gửi bài CHƯA index. <span class="description">Tiết kiệm quota nhưng CẦN cấp quyền Search Console cho service account.</span></label>';
+		echo '</td></tr>';
+		echo '<tr><th>Số URL gửi index/ngày</th><td><input type="number" name="submit_max" value="' . esc_attr($smax) . '" min="1" max="190" style="width:90px"> <span class="description">Quota Google: 200/ngày</span></td></tr>';
+		echo '<tr class="vgi-direct-only"><th>Gửi lại 1 URL sau</th><td><input type="number" name="resubmit_days" value="' . esc_attr($resub) . '" min="1" max="365" style="width:90px"> ngày <span class="description">(chế độ Gửi thẳng) Bài đã gửi trong khoảng này sẽ không gửi lại, ưu tiên bài mới/chưa gửi.</span></td></tr>';
+		echo '<tr class="vgi-smart-only"><th>Property trong Search Console</th><td><input type="url" name="site_url" value="' . esc_attr($site_url) . '" style="width:420px"><p class="description">(chế độ Thông minh) Phải khớp CHÍNH XÁC property trong GSC (vd <code>https://vanphongluatsu.com.vn/</code>). Domain property thì dùng <code>sc-domain:vanphongluatsu.com.vn</code>.</p></td></tr>';
+		echo '<tr class="vgi-smart-only"><th>Số URL kiểm tra/ngày</th><td><input type="number" name="inspect_max" value="' . esc_attr($imax) . '" min="1" max="2000" style="width:90px"> <span class="description">Quota Google: 2.000/ngày</span></td></tr>';
+		echo '</table>';
+
+		// Ẩn/hiện các dòng theo kiểu đang chọn.
+		echo '<script>(function(){function upd(){var m=document.querySelector("input[name=daily_mode]:checked");if(!m)return;var d=m.value==="direct";document.querySelectorAll(".vgi-direct-only").forEach(function(e){e.style.display=d?"":"none"});document.querySelectorAll(".vgi-smart-only").forEach(function(e){e.style.display=d?"none":""})}document.querySelectorAll("input[name=daily_mode]").forEach(function(r){r.addEventListener("change",upd)});upd();})();</script>';
 
 		echo '<p><button class="button button-primary">Lưu cấu hình</button></p></form>';
 
@@ -438,21 +547,31 @@ class Vinasite_Google_Indexing {
 		$stats = (array) get_option(self::OPT_STATS, []);
 		$next  = wp_next_scheduled(self::CRON_HOOK);
 		echo '<div style="background:#fff;border:1px solid #dcdcde;border-radius:8px;padding:12px 18px;margin:10px 0">';
+		echo '<b>Kiểu đang chọn:</b> ' . ($mode === 'direct' ? 'Gửi thẳng' : 'Thông minh (hỏi Search Console)') . '<br>';
 		echo '<b>Lịch chạy kế tiếp:</b> ' . ($next ? esc_html(get_date_from_gmt(gmdate('Y-m-d H:i:s', $next), 'd/m/Y H:i')) : '<span style="color:#b32d2e">chưa bật</span>');
 		if ($stats) {
-			echo '<br><b>Lần quét gần nhất</b> (' . esc_html($stats['time']) . '): kiểm <b>' . intval($stats['checked']) . '</b> URL → đã index <b style="color:#1a7f37">' . intval($stats['indexed']) . '</b>, chưa index <b style="color:#b32d2e">' . intval($stats['not_indexed']) . '</b> → đã gửi <b>' . intval($stats['sent']) . '</b>, lỗi ' . intval($stats['err']);
+			if (($stats['mode'] ?? 'smart') === 'direct') {
+				echo '<br><b>Lần chạy gần nhất</b> (' . esc_html($stats['time']) . '): đã gửi <b>' . intval($stats['sent']) . '</b> URL, lỗi ' . intval($stats['err']);
+			} else {
+				echo '<br><b>Lần chạy gần nhất</b> (' . esc_html($stats['time']) . '): kiểm <b>' . intval($stats['checked']) . '</b> URL → đã index <b style="color:#1a7f37">' . intval($stats['indexed']) . '</b>, chưa index <b style="color:#b32d2e">' . intval($stats['not_indexed']) . '</b> → đã gửi <b>' . intval($stats['sent']) . '</b>, lỗi ' . intval($stats['err']);
+			}
 			if (!empty($stats['note'])) echo '<br><i>' . esc_html($stats['note']) . '</i>';
 		}
 		// Tiến độ toàn site
 		global $wpdb;
-		$done = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key=%s", self::META_CHECKED));
-		$noidx = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key=%s AND meta_value='0'", self::META_INDEXED));
-		echo '<br><b>Tiến độ:</b> đã kiểm tra ' . $done . ' bài — trong đó <b style="color:#b32d2e">' . $noidx . '</b> bài Google báo CHƯA index.';
+		if ($mode === 'direct') {
+			$sent_cnt = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key=%s", self::META_SENT));
+			echo '<br><b>Tiến độ:</b> đã gửi index cho ' . $sent_cnt . ' bài.';
+		} else {
+			$done = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key=%s", self::META_CHECKED));
+			$noidx = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key=%s AND meta_value='0'", self::META_INDEXED));
+			echo '<br><b>Tiến độ:</b> đã kiểm tra ' . $done . ' bài — trong đó <b style="color:#b32d2e">' . $noidx . '</b> bài Google báo CHƯA index.';
+		}
 		echo '</div>';
 
 		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-bottom:8px"><input type="hidden" name="action" value="vgi_scan_now">';
 		wp_nonce_field('vgi_scan_now');
-		echo '<button class="button">Quét ngay 1 lượt (thử)</button> <span class="description">Chạy tối đa ' . self::TIME_BUDGET . ' giây rồi dừng.</span></form>';
+		echo '<button class="button">Chạy ngay 1 lượt (thử)</button> <span class="description">Chạy đúng kiểu đang chọn, tối đa ' . self::TIME_BUDGET . ' giây rồi dừng.</span></form>';
 
 		// Test
 		echo '<hr><h2>4. Test kết nối</h2><form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="vgi_test">';
