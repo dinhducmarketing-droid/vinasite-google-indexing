@@ -3,7 +3,7 @@
  * Plugin Name: Vinasite Google Indexing
  * Plugin URI: https://github.com/dinhducmarketing-droid/vinasite-google-indexing
  * Description: Gửi URL lên Google Indexing API bằng service account. Tự động gửi index khi publish + chạy hàng ngày theo 2 kiểu: Gửi thẳng (không cần Search Console) hoặc Thông minh (hỏi đã index chưa rồi chỉ gửi bài chưa index) + bulk submit + log + retry chống timeout.
- * Version: 1.3
+ * Version: 1.4
  * Author: Vinasite
  * Author URI: https://vinasite.com.vn/
  * Update URI: https://github.com/dinhducmarketing-droid/vinasite-google-indexing
@@ -284,7 +284,7 @@ class Vinasite_Google_Indexing {
 		if (!get_option(self::OPT_JSON)) return;
 
 		$inspect_max = max(1, min(2000, (int) get_option(self::OPT_INSPECT_MAX, 300)));
-		$submit_max  = max(1, min(190,  (int) get_option(self::OPT_SUBMIT_MAX, 150)));
+		$submit_max  = max(1, min(199,  (int) get_option(self::OPT_SUBMIT_MAX, 199)));
 		$deadline    = time() + self::TIME_BUDGET;
 
 		$ids = $this->scan_candidates($inspect_max);
@@ -374,7 +374,7 @@ class Vinasite_Google_Indexing {
 	public function daily_direct_submit() {
 		if (!get_option(self::OPT_JSON)) return;
 
-		$submit_max    = max(1, min(190, (int) get_option(self::OPT_SUBMIT_MAX, 150)));
+		$submit_max    = max(1, min(199, (int) get_option(self::OPT_SUBMIT_MAX, 199)));
 		$resubmit_days = max(1, (int) get_option(self::OPT_RESUBMIT_DAYS, 10));
 		$deadline      = time() + self::TIME_BUDGET;
 
@@ -442,7 +442,7 @@ class Vinasite_Google_Indexing {
 		$site = esc_url_raw(trim(wp_unslash($_POST['site_url'] ?? '')));
 		update_option(self::OPT_SITE_URL, $site ?: home_url('/'), false);
 		update_option(self::OPT_INSPECT_MAX, max(1, min(2000, (int) ($_POST['inspect_max'] ?? 300))), false);
-		update_option(self::OPT_SUBMIT_MAX,  max(1, min(190,  (int) ($_POST['submit_max']  ?? 150))), false);
+		update_option(self::OPT_SUBMIT_MAX,  max(1, min(199,  (int) ($_POST['submit_max']  ?? 199))), false);
 		update_option(self::OPT_RESUBMIT_DAYS, max(1, min(365, (int) ($_POST['resubmit_days'] ?? 10))), false);
 		self::sync_schedule();
 
@@ -475,7 +475,7 @@ class Vinasite_Google_Indexing {
 		if (!current_user_can('manage_options')) wp_die('no');
 		check_admin_referer('vgi_bulk');
 		$what  = sanitize_text_field($_POST['what'] ?? 'page');
-		$limit = min(190, max(1, (int) ($_POST['limit'] ?? 50)));
+		$limit = min(199, max(1, (int) ($_POST['limit'] ?? 199)));
 		$ids = get_posts([
 			'post_type'      => $what,
 			'post_status'    => 'publish',
@@ -522,7 +522,7 @@ class Vinasite_Google_Indexing {
 		$mode      = get_option(self::OPT_DAILY_MODE, 'smart');
 		$site_url  = get_option(self::OPT_SITE_URL) ?: home_url('/');
 		$imax      = (int) get_option(self::OPT_INSPECT_MAX, 300);
-		$smax      = (int) get_option(self::OPT_SUBMIT_MAX, 150);
+		$smax      = (int) get_option(self::OPT_SUBMIT_MAX, 199);
 		$resub     = (int) get_option(self::OPT_RESUBMIT_DAYS, 10);
 		echo '<h2>3. Tự động gửi index hàng ngày</h2>';
 		echo '<label><input type="checkbox" name="cron_on" value="1" ' . checked($cron_on, true, false) . '> <b>Bật chạy tự động hàng ngày (3:00 sáng)</b></label>';
@@ -532,7 +532,7 @@ class Vinasite_Google_Indexing {
 		echo '<label style="display:block;margin-bottom:6px"><input type="radio" name="daily_mode" value="direct" ' . checked($mode, 'direct', false) . '> <b>Gửi thẳng</b> — gửi bài mới nhất thẳng lên Indexing API. <span class="description">Chạy được ngay, chỉ cần quyền Indexing API. Không cần Search Console.</span></label>';
 		echo '<label style="display:block"><input type="radio" name="daily_mode" value="smart" ' . checked($mode, 'smart', false) . '> <b>Thông minh</b> — hỏi Google “đã index chưa?” rồi chỉ gửi bài CHƯA index. <span class="description">Tiết kiệm quota nhưng CẦN cấp quyền Search Console cho service account.</span></label>';
 		echo '</td></tr>';
-		echo '<tr><th>Số URL gửi index/ngày</th><td><input type="number" name="submit_max" value="' . esc_attr($smax) . '" min="1" max="190" style="width:90px"> <span class="description">Quota Google: 200/ngày</span></td></tr>';
+		echo '<tr><th>Số URL gửi index/ngày</th><td><input type="number" name="submit_max" value="' . esc_attr($smax) . '" min="1" max="199" style="width:90px"> <span class="description">Quota Google: 200/ngày</span></td></tr>';
 		echo '<tr class="vgi-direct-only"><th>Gửi lại 1 URL sau</th><td><input type="number" name="resubmit_days" value="' . esc_attr($resub) . '" min="1" max="365" style="width:90px"> ngày <span class="description">(chế độ Gửi thẳng) Bài đã gửi trong khoảng này sẽ không gửi lại, ưu tiên bài mới/chưa gửi.</span></td></tr>';
 		echo '<tr class="vgi-smart-only"><th>Property trong Search Console</th><td><input type="url" name="site_url" value="' . esc_attr($site_url) . '" style="width:420px"><p class="description">(chế độ Thông minh) Phải khớp CHÍNH XÁC property trong GSC (vd <code>https://vanphongluatsu.com.vn/</code>). Domain property thì dùng <code>sc-domain:vanphongluatsu.com.vn</code>.</p></td></tr>';
 		echo '<tr class="vgi-smart-only"><th>Số URL kiểm tra/ngày</th><td><input type="number" name="inspect_max" value="' . esc_attr($imax) . '" min="1" max="2000" style="width:90px"> <span class="description">Quota Google: 2.000/ngày</span></td></tr>';
@@ -581,8 +581,8 @@ class Vinasite_Google_Indexing {
 		// Bulk
 		echo '<hr><h2>5. Gửi index hàng loạt</h2><form method="post" action="' . esc_url(admin_url('admin-post.php')) . '"><input type="hidden" name="action" value="vgi_bulk">';
 		wp_nonce_field('vgi_bulk');
-		echo 'Gửi <select name="what"><option value="page">Trang (page)</option><option value="post">Bài viết (post)</option><option value="recruit">Tuyển dụng</option></select> ';
-		echo 'mới nhất, số lượng <input type="number" name="limit" value="50" min="1" max="190" style="width:70px"> (tối đa 190/lần — quota Google 200/ngày) ';
+		echo 'Gửi <select name="what"><option value="post">Bài viết (post)</option><option value="product">Sản phẩm (product)</option><option value="page">Trang (page)</option></select> ';
+		echo 'mới nhất, số lượng <input type="number" name="limit" value="199" min="1" max="199" style="width:70px"> (tối đa 199/lần — quota Google 200/ngày) ';
 		echo '<button class="button button-primary">Gửi ngay</button></form>';
 
 		// Log

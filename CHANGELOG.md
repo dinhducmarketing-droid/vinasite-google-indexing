@@ -1,5 +1,9 @@
 # Changelog — Vinasite Google Indexing
 
+## [1.4] — 2026-07
+- Mặc định gửi **199 URL/ngày** (tận dụng tối đa quota Google 200/ngày, chừa 1 dự phòng) — áp dụng cho cả chạy hàng ngày lẫn gửi hàng loạt; giới hạn nhập tối đa nâng 190 → 199. Site đã tự lưu số riêng thì giữ nguyên số của họ.
+- Gửi hàng loạt: dropdown còn **Bài viết (post)** · **Sản phẩm (product)** · **Trang (page)** — bài viết đứng đầu làm mặc định, thêm sản phẩm cho site WooCommerce, bỏ Tuyển dụng. Số lượng mặc định 50 → 199.
+
 ## [1.3] — 2026-07
 - **Thêm chế độ "Gửi thẳng" hàng ngày** — mỗi ngày (3:00 sáng) tự gửi bài mới nhất thẳng lên Indexing API, KHÔNG cần hỏi Search Console. Chạy được ngay chỉ với quyền Indexing API. Trước đây chỉ có kiểu "Thông minh" (hỏi đã index chưa rồi mới gửi) — kiểu này cần cấp quyền Search Console cho service account; site nào chưa cấu hình thì quét bị kẹt, không gửi được gì.
 - Chọn kiểu chạy ở mục 3 trang cài đặt: **Gửi thẳng** (không cần GSC) hoặc **Thông minh** (tiết kiệm quota, cần GSC). Mặc định giữ **Thông minh** khi cập nhật để không đổi hành vi site đang chạy; site tự chuyển sang Gửi thẳng nếu muốn.
